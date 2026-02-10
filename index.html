@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S.I.G.N.A.L - Audio Interceptor</title>
+    <style>
+        :root {
+            --bg: #000;
+            --grid: #0f380f;
+            --primary: #0f0;
+            --secondary: #003300;
+            --text: #00ff00;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* --- UI OVERLAY --- */
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 10;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 2px solid var(--secondary);
+            padding-bottom: 10px;
+            background: linear-gradient(180deg, rgba(0,20,0,0.8), transparent);
+        }
+
+        h1 { margin: 0; font-size: 24px; text-shadow: 0 0 10px var(--primary); }
+        .status { font-size: 12px; animation: blink 2s infinite; }
+
+        .data-panel {
+            display: flex;
+            justify-content: space-between;
+            font-size: 14px;
+        }
+
+        .metric-box {
+            background: rgba(0, 20, 0, 0.7);
+            border: 1px solid var(--secondary);
+            padding: 10px;
+            width: 150px;
+        }
+
+        .big-val { font-size: 24px; font-weight: bold; text-shadow: 0 0 5px var(--primary); }
+        
+        /* --- CANVASES --- */
+        #visualizer-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        canvas {
+            position: absolute;
+        }
+
+        /* Start Button */
+        #start-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 100;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            cursor: pointer;
+        }
+        
+        .btn-start {
+            border: 2px solid var(--primary);
+            color: var(--primary);
+            padding: 20px 40px;
+            font-size: 20px;
+            background: transparent;
+            text-transform: uppercase;
+            letter-spacing: 5px;
+            box-shadow: 0 0 20px var(--secondary);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse { 0% { box-shadow: 0 0 10px var(--secondary); } 50% { box-shadow: 0 0 30px var(--primary); } 100% { box-shadow: 0 0 10px var(--secondary); } }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        /* Grid Background Effect */
+        .grid-lines {
+            position: absolute; width: 100%; height: 100%;
+            background-image: 
+                linear-gradient(var(--grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+            background-size: 50px 50px;
+            opacity: 0.3;
+            z-index: 0;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="start-overlay" onclick="initSystem()">
+        <button class="btn-start">Initialize System</button>
+        <p style="margin-top:20px; color:#555;">[ CLICK ANYWHERE ]</p>
+    </div>
+
+    <!-- UI Layer -->
+    <div id="ui-layer">
+        <header>
+            <div>
+                <h1>S.I.G.N.A.L</h1>
+                <div style="font-size: 10px; opacity: 0.7;">FREQ INTERCEPTOR V.9.0</div>
+            </div>
+            <div style="text-align: right;">
+                <div class="status">● SYSTEM ACTIVE</div>
+                <div id="clock">00:00:00</div>
+            </div>
+        </header>
+
+        <div class="data-panel">
+            <div class="metric-box">
+                <div>PEAK FREQ (Hz)</div>
+                <div class="big-val" id="peak-hz">0</div>
+            </div>
+            <div class="metric-box" style="text-align:right;">
+                <div>DECIBEL (dB)</div>
+                <div class="big-val" id="db-level">-∞</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Background Grid -->
+    <div class="grid-lines"></div>
+
+    <!-- Visualizers -->
+    <div id="visualizer-container">
+        <!-- Layer 1: Spectrogram (Waterfall) -->
+        <canvas id="canvas-spec"></canvas>
+        <!-- Layer 2: Waveform (Oscilloscope) -->
+        <canvas id="canvas-wave"></canvas>
+    </div>
+
+    <script>
+        let audioCtx, analyser, microphone, dataArray, bufferLength;
+        let canvasWave, ctxWave, canvasSpec, ctxSpec;
+        let width, height;
+        let isRunning = false;
+        
+        // Spectrogram Variables
+        let tempCanvas, tempCtx;
+        let colorScale = [];
+
+        function initSystem() {
+            if (isRunning) return;
+            document.getElementById('start-overlay').style.display = 'none';
+            
+            // 1. Audio Context Setup
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 2048; // Resolution (Detail)
+            
+            bufferLength = analyser.frequencyBinCount;
+            dataArray = new Uint8Array(bufferLength);
+
+            // 2. Microphone Access
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    microphone = audioCtx.createMediaStreamSource(stream);
+                    microphone.connect(analyser);
+                    
+                    setupCanvas();
+                    generateColorScale();
+                    loop(); // Start Animation
+                    isRunning = true;
+                })
+                .catch(err => alert("Microphone blocked! Cannot intercept signals."));
+        }
+
+        function setupCanvas() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+
+            // Wave Canvas
+            canvasWave = document.getElementById('canvas-wave');
+            canvasWave.width = width;
+            canvasWave.height = height;
+            ctxWave = canvasWave.getContext('2d');
+
+            // Spectrogram Canvas
+            canvasSpec = document.getElementById('canvas-spec');
+            canvasSpec.width = width;
+            canvasSpec.height = height;
+            ctxSpec = canvasSpec.getContext('2d');
+
+            // Temp Canvas (for scrolling effect)
+            tempCanvas = document.createElement('canvas');
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            tempCtx = tempCanvas.getContext('2d');
+        }
+
+        // Create Matrix-like Green Color Palette
+        function generateColorScale() {
+            for (let i = 0; i <= 255; i++) {
+                // Black -> Dark Green -> Bright Green -> White
+                if(i < 100) colorScale[i] = `rgb(0, ${i*2}, 0)`; 
+                else if(i < 200) colorScale[i] = `rgb(0, 255, ${i-100})`;
+                else colorScale[i] = `rgb(${i}, 255, ${i})`;
+            }
+        }
+
+        function loop() {
+            requestAnimationFrame(loop);
+            analyser.getByteFrequencyData(dataArray);
+
+            drawWaveform();
+            drawSpectrogram();
+            analyzeData();
+            updateClock();
+        }
+
+        // 1. Draw The Circular Radar / Waveform
+        function drawWaveform() {
+            ctxWave.clearRect(0, 0, width, height);
+            
+            // Center Circle
+            let cx = width / 2;
+            let cy = height / 2;
+            let radius = 100;
+
+            ctxWave.beginPath();
+            ctxWave.strokeStyle = '#00ff00';
+            ctxWave.lineWidth = 2;
+
+            // Draw circular wave based on frequency
+            for (let i = 0; i < bufferLength; i+=10) {
+                let v = dataArray[i]; 
+                let r = radius + (v * 0.8); // Extend radius based on volume
+                
+                let angle = (i / bufferLength) * Math.PI * 2;
+                let x = cx + Math.cos(angle) * r;
+                let y = cy + Math.sin(angle) * r;
+
+                if (i === 0) ctxWave.moveTo(x, y);
+                else ctxWave.lineTo(x, y);
+            }
+            
+            ctxWave.closePath();
+            ctxWave.stroke();
+
+            // Inner Static Rings
+            ctxWave.beginPath();
+            ctxWave.arc(cx, cy, 50, 0, Math.PI * 2);
+            ctxWave.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+            ctxWave.stroke();
+        }
+
+        // 2. Draw Falling Waterfall (Spectrogram)
+        function drawSpectrogram() {
+            // Save current canvas state to temp
+            tempCtx.drawImage(canvasSpec, 0, 0);
+
+            // Draw new line at top
+            // Shift everything down by 2 pixels
+            ctxSpec.fillStyle = 'rgba(0, 0, 0, 0.05)'; // Fade out effect
+            // ctxSpec.fillRect(0, 0, width, height); // Optional fade
+
+            ctxSpec.drawImage(tempCanvas, 0, 2);
+
+            // Draw new row of frequency data at top
+            for (let i = 0; i < bufferLength; i++) {
+                let value = dataArray[i];
+                if(value > 10) { // Only draw if sound exists
+                    ctxSpec.fillStyle = colorScale[value];
+                    // Map frequency index to screen width
+                    let x = (i / bufferLength) * width;
+                    let barWidth = width / bufferLength;
+                    
+                    ctxSpec.fillRect(x, 0, barWidth, 2);
+                }
+            }
+        }
+
+        // 3. Logic: Analyze Hz and dB
+        function analyzeData() {
+            // Find Peak Frequency
+            let maxVal = 0;
+            let maxIndex = 0;
+            let sum = 0;
+
+            for(let i = 0; i < bufferLength; i++) {
+                let v = dataArray[i];
+                sum += v;
+                if(v > maxVal) {
+                    maxVal = v;
+                    maxIndex = i;
+                }
+            }
+
+            // Simple calculation for Hz (Not 100% accurate but cool for visual)
+            let nyquist = audioCtx.sampleRate / 2;
+            let hz = Math.round(maxIndex * (nyquist / bufferLength));
+            
+            // Decibel approximation
+            let average = sum / bufferLength;
+            let db = Math.round((average / 255) * 100); 
+
+            // Update UI
+            if (average > 10) {
+                document.getElementById('peak-hz').innerText = hz;
+                document.getElementById('db-level').innerText = db;
+            } else {
+                document.getElementById('peak-hz').innerText = "SCANNING...";
+            }
+        }
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').innerText = now.toLocaleTimeString();
+        }
+
+        // Resize Handling
+        window.addEventListener('resize', () => {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvasWave.width = width; canvasWave.height = height;
+            canvasSpec.width = width; canvasSpec.height = height;
+            tempCanvas.width = width; tempCanvas.height = height;
+        });
+
+    </script>
+</body>
+</html>
